@@ -24,30 +24,57 @@ using System;
 // 15:RElbow
 // 16:RWrist
 
-public class Pos_txt_Reader : MonoBehaviour
+public class PosTxtReader : MonoBehaviour
 {
-	float scale_ratio = 0.001f;  // pos.txtとUnityモデルのスケール比率
-	                             // pos.txtの単位はmmでUnityはmのため、0.001に近い値を指定。モデルの大きさによって調整する
-	float heal_position = 0.05f; // 足の沈みの補正値(単位：m)。プラス値で体全体が上へ移動する
-	float head_angle = 15f; // 顔の向きの調整 顔を15度上げる
+	public String posFilename; // pos.txtのファイル名
 
-	public String pos_filename; // pos.txtのファイル名
-	public Boolean debug_cube; // デバッグ用Cubeの表示フラグ
-	public int start_frame; // 開始フレーム
-	public String end_frame; // 終了フレーム	
-	float play_time; // 再生時間 
-	Transform[] bone_t; // モデルのボーンのTransform
-	Transform[] cube_t; // デバック表示用のCubeのTransform
-	Vector3 init_position; // 初期のセンターの位置
-	Quaternion[] init_rot; // 初期の回転値
-	Quaternion[] init_inv; // 初期のボーンの方向から計算されるクオータニオンのInverse
+ 	// ----------------------------------------------
+	[Header("Option")]
+	public int startFrame; // 開始フレーム
+	public String endFrame; // 終了フレーム
+	public int nowFrame_readonly; // 現在のフレーム (Read only)
+	public float upPosition = 0.1f; // 足の沈みの補正値(単位：m)。プラス値で体全体が上へ移動する
+	public Boolean showDebugCube; // デバッグ用Cubeの表示フラグ
+
+	// ----------------------------------------------
+	[Header("Save Motion")] 
+    [Tooltip("When this flag is set, save motion at the end frame of Play.")]
+	public Boolean saveMotion; // Playの最終フレーム時にモーションを保存する
+
+    [Tooltip("This is the filename to which the BVH file will be saved. If no filename is given, a new one will be generated based on a timestamp. If the file already exists, a number will be appended.")]
+	public String saveBVHFilename; // 保存ファイル名
+
+    [Tooltip("When this flag is set, existing files will be overwritten and no number will be appended at the end to avoid this.")]
+ 	public bool overwrite = false; // Falseの場合は、上書きせずにファイル名の末尾に数字を付加する。
+    
+    [Tooltip("When this option is enabled, only humanoid bones will be targeted for detecting bones. This means that things like hair bones will not be added to the list of bones when detecting bones.")]
+	public bool enforceHumanoidBones = true; // 髪などの骨格以外のボーンは出力しない
+
+	// ----------------------------------------------
+	float scaleRatio = 0.001f;  // pos.txtとUnityモデルのスケール比率
+	                             // pos.txtの単位はmmでUnityはmのため、0.001に近い値を指定。モデルの大きさによって調整する
+	float headAngle = 15f; // 顔の向きの調整 顔を15度上げる
+	// ----------------------------------------------
+
+
+	float playTime; // 再生時間 
+	int frame;	// 再生フレーム
+	Transform[] boneT; // モデルのボーンのTransform
+	Transform[] cubeT; // デバック表示用のCubeのTransform
+	Vector3 rootPosition; // 初期のAvatarの位置
+	Quaternion rootRotation; // 初期のAvatarのの回転
+	Quaternion[] initRot; // 初期の回転値
+	Quaternion[] initInv; // 初期のボーンの方向から計算されるクオータニオンのInverse
+	float hipHeight; // hipのposition.y
 	List<Vector3[]> pos; // pos.txtのデータを保持するコンテナ
+	BVHRecorder recorder; // BVH保存用コンポーネント
 	int[] bones = new int[10] { 1, 2, 4, 5, 7, 8, 11, 12, 14, 15 }; // 親ボーン
- 	int[] child_bones = new int[10] { 2, 3, 5, 6, 8, 10, 12, 13, 15, 16 }; // bonesに対応する子ボーン
- 	int bone_num = 17;
+ 	int[] childBones = new int[10] { 2, 3, 5, 6, 8, 10, 12, 13, 15, 16 }; // bonesに対応する子ボーン
+ 	int boneNum = 17;
 	Animator anim;
-	int s_frame;
-	int e_frame;
+	int sFrame;
+	int eFrame;
+	bool bvhSaved = false;
 
 	// pos.txtのデータを読み込み、リストで返す
 	List<Vector3[]> ReadPosData(string filename) {
@@ -60,15 +87,21 @@ public class Pos_txt_Reader : MonoBehaviour
 		}
 		sr.Close();
 
-		foreach (string line in lines) {
-			string line2 = line.Replace(",", "");
-			string[] str = line2.Split(new string[] { " " }, System.StringSplitOptions.RemoveEmptyEntries); // スペースで分割し、空の文字列は削除
+		try {
+			foreach (string line in lines) {
+				string line2 = line.Replace(",", "");
+				string[] str = line2.Split(new string[] { " " }, System.StringSplitOptions.RemoveEmptyEntries); // スペースで分割し、空の文字列は削除
 
-			Vector3[] vs = new Vector3[bone_num];
-			for (int i = 0; i < str.Length; i += 4) {
-				vs[(int)(i/4)] = new Vector3(-float.Parse(str[i + 1]), float.Parse(str[i + 3]), -float.Parse(str[i + 2]));
+				Vector3[] vs = new Vector3[boneNum];
+				for (int i = 0; i < str.Length; i += 4) {
+					vs[(int)(i/4)] = new Vector3(-float.Parse(str[i + 1]), float.Parse(str[i + 3]), -float.Parse(str[i + 2]));
+				}
+				data.Add(vs);
 			}
-			data.Add(vs);
+		} 
+		catch (Exception e) {
+			Debug.Log("<color=blue>Error! Pos File is broken(" + filename + ").</color>");
+			return null;
 		}
 		return data;
 	}
@@ -76,41 +109,49 @@ public class Pos_txt_Reader : MonoBehaviour
 	// BoneTransformの取得。回転の初期値を取得
 	void GetInitInfo()
 	{
-		bone_t = new Transform[bone_num];
-		init_rot = new Quaternion[bone_num];
-		init_inv = new Quaternion[bone_num];
+		boneT = new Transform[boneNum];
+		initRot = new Quaternion[boneNum];
+		initInv = new Quaternion[boneNum];
 
-		bone_t[0] = anim.GetBoneTransform(HumanBodyBones.Hips);
-		bone_t[1] = anim.GetBoneTransform(HumanBodyBones.RightUpperLeg);
-		bone_t[2] = anim.GetBoneTransform(HumanBodyBones.RightLowerLeg);
-		bone_t[3] = anim.GetBoneTransform(HumanBodyBones.RightFoot);
-		bone_t[4] = anim.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
-		bone_t[5] = anim.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
-		bone_t[6] = anim.GetBoneTransform(HumanBodyBones.LeftFoot);
-		bone_t[7] = anim.GetBoneTransform(HumanBodyBones.Spine);
-		bone_t[8] = anim.GetBoneTransform(HumanBodyBones.Neck);
-		bone_t[10] = anim.GetBoneTransform(HumanBodyBones.Head);
-		bone_t[11] = anim.GetBoneTransform(HumanBodyBones.LeftUpperArm);
-		bone_t[12] = anim.GetBoneTransform(HumanBodyBones.LeftLowerArm);
-		bone_t[13] = anim.GetBoneTransform(HumanBodyBones.LeftHand);
-		bone_t[14] = anim.GetBoneTransform(HumanBodyBones.RightUpperArm);
-		bone_t[15] = anim.GetBoneTransform(HumanBodyBones.RightLowerArm);
-		bone_t[16] = anim.GetBoneTransform(HumanBodyBones.RightHand);
+		boneT[0] = anim.GetBoneTransform(HumanBodyBones.Hips);
+		boneT[1] = anim.GetBoneTransform(HumanBodyBones.RightUpperLeg);
+		boneT[2] = anim.GetBoneTransform(HumanBodyBones.RightLowerLeg);
+		boneT[3] = anim.GetBoneTransform(HumanBodyBones.RightFoot);
+		boneT[4] = anim.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
+		boneT[5] = anim.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
+		boneT[6] = anim.GetBoneTransform(HumanBodyBones.LeftFoot);
+		boneT[7] = anim.GetBoneTransform(HumanBodyBones.Spine);
+		boneT[8] = anim.GetBoneTransform(HumanBodyBones.Neck);
+		boneT[10] = anim.GetBoneTransform(HumanBodyBones.Head);
+		boneT[11] = anim.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+		boneT[12] = anim.GetBoneTransform(HumanBodyBones.LeftLowerArm);
+		boneT[13] = anim.GetBoneTransform(HumanBodyBones.LeftHand);
+		boneT[14] = anim.GetBoneTransform(HumanBodyBones.RightUpperArm);
+		boneT[15] = anim.GetBoneTransform(HumanBodyBones.RightLowerArm);
+		boneT[16] = anim.GetBoneTransform(HumanBodyBones.RightHand);
+
+		if (boneT[0] == null) {
+			Debug.Log("<color=blue>Error! Failed to get Bone Transform. Confirm wherther animation type of your model is Humanoid</color>");
+			return;
+		}
 
 		// Spine,LHip,RHipで三角形を作ってそれを前方向とする。
-		Vector3 init_forward = TriangleNormal(bone_t[7].position, bone_t[4].position, bone_t[1].position);
-		init_inv[0] = Quaternion.Inverse(Quaternion.LookRotation(init_forward));
+		Vector3 initForward = TriangleNormal(boneT[7].position, boneT[4].position, boneT[1].position);
+		initInv[0] = Quaternion.Inverse(Quaternion.LookRotation(initForward));
 
-		init_position = bone_t[0].position;
-		init_rot[0] = bone_t[0].rotation;
+		// initPosition = boneT[0].position;
+		rootPosition = this.transform.position;
+		rootRotation = this.transform.rotation;
+		initRot[0] = boneT[0].rotation;
+		hipHeight = boneT[0].position.y - this.transform.position.y;
 		for (int i = 0; i < bones.Length; i++) {
 			int b = bones[i];
-			int cb = child_bones[i];
+			int cb = childBones[i];
 
 			// 対象モデルの回転の初期値
-			init_rot[b] = bone_t[b].rotation;
+			initRot[b] = boneT[b].rotation;
 			// 初期のボーンの方向から計算されるクオータニオン
-			init_inv[b] = Quaternion.Inverse(Quaternion.LookRotation(bone_t[b].position - bone_t[cb].position,init_forward));
+			initInv[b] = Quaternion.Inverse(Quaternion.LookRotation(boneT[b].position - boneT[cb].position,initForward));
 		}
 	}
 
@@ -129,17 +170,17 @@ public class Pos_txt_Reader : MonoBehaviour
 	// デバック用cubeを生成する。生成済みの場合は位置を更新する
 	void UpdateCube(int frame)
 	{
-		if (cube_t == null) {
+		if (cubeT == null) {
 			// 初期化して、cubeを生成する
-			cube_t = new Transform[bone_num];
+			cubeT = new Transform[boneNum];
 
-			for (int i = 0; i < bone_num; i++) {
+			for (int i = 0; i < boneNum; i++) {
 				Transform t = GameObject.CreatePrimitive(PrimitiveType.Cube).transform;
 				t.transform.parent = this.transform;
-				t.localPosition = pos[frame][i] * scale_ratio;
+				t.localPosition = pos[frame][i] * scaleRatio;
 				t.name = i.ToString();
 				t.localScale = new Vector3(0.05f, 0.05f, 0.05f);
-				cube_t[i] = t;
+				cubeT[i] = t;
 
 				Destroy(t.GetComponent<BoxCollider>());
 			}
@@ -149,74 +190,119 @@ public class Pos_txt_Reader : MonoBehaviour
 			Vector3 offset = new Vector3(1.2f, 0, 0);
 
 			// 初期化済みの場合は、cubeの位置を更新する
-			for (int i = 0; i < bone_num; i++) {
-				cube_t[i].localPosition = pos[frame][i] * scale_ratio + new Vector3(0, heal_position, 0) + offset;
+			for (int i = 0; i < boneNum; i++) {
+				cubeT[i].localPosition = pos[frame][i] * scaleRatio + new Vector3(0, upPosition, 0) + offset;
 			}
 		}
 	}
 
 	void Start()
 	{
+
 		anim = GetComponent<Animator>();
-		play_time = 0;
-		if (System.IO.File.Exists (pos_filename) == false) {
-			Debug.Log("<color=blue>Error! Pos file not found(" + pos_filename + "). Check Pos_filename in Inspector.</color>");
+		playTime = 0;
+		if (posFilename == "") {
+			Debug.Log("<color=blue>Error! Pos filename  is empty.</color>");
+			return;
 		}
-		pos = ReadPosData(pos_filename);
+		if (System.IO.File.Exists(posFilename) == false) {
+			Debug.Log("<color=blue>Error! Pos file not found(" + posFilename + ").</color>");
+			return;
+		}
+		pos = ReadPosData(posFilename);
 		GetInitInfo();
 		if (pos != null) {
 			// inspectorで指定した開始フレーム、終了フレーム番号をセット
-			if (start_frame >= 0 && start_frame < pos.Count) {
-				s_frame = start_frame;
+			if (startFrame >= 0 && startFrame < pos.Count) {
+				sFrame = startFrame;
 			} else {
-				s_frame = 0;
+				sFrame = 0;
 			}
 			int ef;
-			if (int.TryParse(end_frame, out ef)) {
-				if (ef >= s_frame && ef < pos.Count) {
-					e_frame = ef;
+			if (int.TryParse(endFrame, out ef)) {
+				if (ef >= sFrame && ef < pos.Count) {
+					eFrame = ef;
 				} else {
-					e_frame = pos.Count - 1;
+					eFrame = pos.Count - 1;
 				}
 			} else {
-				e_frame = pos.Count - 1;
+				eFrame = pos.Count - 1;
 			}
-			Debug.Log("End Frame:" + e_frame.ToString());
+			frame = sFrame;
+		}
+
+		if (saveMotion) {
+			recorder = gameObject.AddComponent<BVHRecorder>();
+			recorder.scripted = true;
+			recorder.targetAvatar = anim;
+			recorder.blender = false;
+			recorder.enforceHumanoidBones = enforceHumanoidBones;
+			recorder.getBones();
+			recorder.buildSkeleton();
+			recorder.genHierarchy();
+			recorder.frameRate = 30.0f;
 		}
 	}
 
 	void Update()
 	{
-		if (pos == null) {
+		if (pos == null || boneT[0] == null) {
 			return;
 		}
-		play_time += Time.deltaTime;
+		playTime += Time.deltaTime;
 
-		int frame = s_frame + (int)(play_time * 30.0f);  // pos.txtは30fpsを想定
-		if (frame > e_frame) {
-			play_time = 0;  // 繰り返す
-			frame = s_frame;
+		if (saveMotion && recorder != null) {
+			// ファイル出力の場合は1フレームずつ進める
+			frame += 1;
+		} else {
+			frame = sFrame + (int)(playTime * 30.0f);  // pos.txtは30fpsを想定
 		}
+		if (frame > eFrame) {
+			if (saveMotion && recorder != null) {
+				if (!bvhSaved) {
+					bvhSaved = true;
+					if (saveBVHFilename != "") {
+						string fullpath = Path.GetFullPath(saveBVHFilename);
+						// recorder.directory = Path.GetDirectoryName(fullpath);
+						// recorder.filename = Path.GetFileName(fullpath);
+						recorder.directory = "";
+						recorder.filename = fullpath;
+						recorder.overwrite = overwrite;
+						recorder.saveBVH();
+						Debug.Log("Saved Motion(BVH) to " + recorder.lastSavedFile);
+					} else {
+						Debug.Log("<color=blue>Error! Save BVH Filename is empty.</color>");
+					}
+				}
+			}
+			return;
+		}
+		nowFrame_readonly = frame; // Inspector表示用
 
-		if (debug_cube) {
+		if (showDebugCube) {
 			UpdateCube(frame); // デバッグ用Cubeを表示する
 		}
 
-		Vector3[] now_pos = pos[frame];
+		Vector3[] nowPos = pos[frame];
 	
 		// センターの移動と回転
-		Vector3 pos_forward = TriangleNormal(now_pos[7], now_pos[4], now_pos[1]);
-		bone_t[0].position = now_pos[0] * scale_ratio + new Vector3(init_position.x, heal_position, init_position.z);
-		bone_t[0].rotation = Quaternion.LookRotation(pos_forward) * init_inv[0] * init_rot[0];
+		Vector3 posForward = TriangleNormal(nowPos[7], nowPos[4], nowPos[1]);
+
+		this.transform.position = rootRotation * nowPos[0] * scaleRatio + rootPosition + new Vector3(0, upPosition - hipHeight , 0);
+		boneT[0].rotation = rootRotation * Quaternion.LookRotation(posForward) * initInv[0] * initRot[0];
 
 		// 各ボーンの回転
 		for (int i = 0; i < bones.Length; i++) {
 			int b = bones[i];
-			int cb = child_bones[i];
-			bone_t[b].rotation = Quaternion.LookRotation(now_pos[b] - now_pos[cb], pos_forward) * init_inv[b] * init_rot[b];
+			int cb = childBones[i];
+			boneT[b].rotation = rootRotation * Quaternion.LookRotation(nowPos[b] - nowPos[cb], posForward) * initInv[b] * initRot[b];
 		}
 
 		// 顔の向きを上げる調整。両肩を結ぶ線を軸として回転
-		bone_t[8].rotation = Quaternion.AngleAxis(head_angle, bone_t[11].position - bone_t[14].position) * bone_t[8].rotation;
+		boneT[8].rotation = Quaternion.AngleAxis(headAngle, boneT[11].position - boneT[14].position) * boneT[8].rotation;
+
+		if (saveMotion && recorder != null) {
+			recorder.captureFrame();
+		}
 	}
 }
